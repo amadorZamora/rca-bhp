@@ -336,8 +336,10 @@ export default function App() {
                   </thead>
                   <tbody>
                     {(actList as any[]).map((a, i) => (
-                      <tr key={a.id} style={{ borderBottom: "1px solid #E8F5E9" }}>
-                        <td style={{ padding: "8px 12px", color: "#aaa", fontWeight: 700 }}>{i + 1}</td>
+                      <tr key={a.id} style={{ borderBottom: "1px solid #E8F5E9", background: a.fromCause ? "#F3E5F5" : "white" }}>
+                        <td style={{ padding: "8px 12px", color: "#aaa", fontWeight: 700 }}>
+                          {i + 1}{a.fromCause && <span title="Generada desde causa raíz" style={{ marginLeft: 4, fontSize: 11 }}>🔍</span>}
+                        </td>
                         <td style={{ padding: "8px 12px" }}>
                           <input defaultValue={a.what} onBlur={e => updateAction(a.id, "what", e.target.value)} placeholder="¿Qué se va a hacer exactamente?"
                             style={{ width: "100%", border: "none", borderBottom: "1.5px solid #C8E6C9", outline: "none", fontSize: 13, padding: "4px 0", background: "transparent" }} />
@@ -452,14 +454,40 @@ export default function App() {
                       );
                     })}
                   </div>
-                  {/* Causa raíz */}
+                  {/* Causa raíz + botón crear acción */}
                   {(() => {
                     const whys = (porques as any)[selectedProblem.id]?.whys || [];
                     const lastFilled = [...whys].reverse().find((w: string) => w?.trim());
+                    const alreadyCreated = actList.some((a: any) => a.fromCause === selectedProblem.id);
                     return lastFilled ? (
-                      <div style={{ marginTop: 20, background: "#E8F5E9", borderRadius: 8, padding: 14, borderLeft: "4px solid #388E3C" }}>
-                        <div style={{ fontSize: 11, color: "#2E7D32", fontWeight: 700, marginBottom: 4 }}>🎯 CAUSA RAÍZ IDENTIFICADA</div>
-                        <div style={{ fontSize: 14, color: "#1B5E20" }}>{lastFilled}</div>
+                      <div style={{ marginTop: 20 }}>
+                        <div style={{ background: "#E8F5E9", borderRadius: 8, padding: 14, borderLeft: "4px solid #388E3C", marginBottom: 12 }}>
+                          <div style={{ fontSize: 11, color: "#2E7D32", fontWeight: 700, marginBottom: 4 }}>🎯 CAUSA RAÍZ IDENTIFICADA</div>
+                          <div style={{ fontSize: 14, color: "#1B5E20" }}>{lastFilled}</div>
+                        </div>
+                        {alreadyCreated ? (
+                          <div style={{ background: "#E3F2FD", borderRadius: 8, padding: 10, fontSize: 13, color: "#1565C0", textAlign: "center" }}>
+                            ✅ Ya existe una acción creada desde esta causa raíz — revísala en <strong>✅ Acciones</strong>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={async () => {
+                              const id = uid();
+                              await setDoc(doc(db, "actions", id), {
+                                what: `[Causa raíz] ${lastFilled}`,
+                                who: "",
+                                when: "",
+                                priority: "🔴 Alta",
+                                createdAt: Date.now(),
+                                fromCause: selectedProblem.id,
+                                problem: selectedProblem.text.slice(0, 60),
+                              });
+                              setTab("acciones");
+                            }}
+                            style={{ width: "100%", background: "#1565C0", color: "#fff", border: "none", borderRadius: 8, padding: "12px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
+                            ➕ Crear acción desde esta causa raíz → ir a Acciones
+                          </button>
+                        )}
                       </div>
                     ) : null;
                   })()}
