@@ -2,7 +2,8 @@ import { useState, useEffect } from "react";
 import { initializeApp } from "firebase/app";
 import {
   getFirestore, collection, onSnapshot, doc,
-  setDoc, deleteDoc, getDoc, getDocs, serverTimestamp
+  setDoc, deleteDoc, getDoc, getDocs, serverTimestamp,
+  increment, updateDoc
 } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -22,24 +23,27 @@ const COLUMNS = [
   { id:"bien",      title:"¿Qué Hicimos Bien?",                        color:"#BBDEFB", header:"#42A5F5", placeholder:"¿Qué funcionó correctamente?" },
   { id:"lecciones", title:"¿Qué Lecciones Aplican a Otros Proyectos?", color:"#F8BBD0", header:"#EC407A", placeholder:"Lección transferible..." },
 ];
-const IMPACT        = ["🔴 Alto","🟡 Medio","🟢 Bajo"];
-const AREAS         = ["Planificación","Ejecución","Comunicación","Recursos","Técnico","Seguridad","Otro"];
-const ANALYZE_COLS  = ["problemas","mejorar"];
-const VOTES_PER_COL = 2;
-const ALL_PHASES    = ["board","votar","porques","acciones","resumen"];
+const IMPACT       = ["🔴 Alto","🟡 Medio","🟢 Bajo"];
+const AREAS        = ["Planificación","Ejecución","Comunicación","Recursos","Técnico","Seguridad","Otro"];
+const ANALYZE_COLS = ["problemas"];
+const ALL_PHASES   = ["board","votar","porques","acciones","resumen"];
 const PHASE_LABELS: Record<string,string> = {
   board:"📝 Board", votar:"🗳️ Votar", porques:"🔍 5 Porqués",
   acciones:"✅ Acciones", resumen:"📊 Resumen"
 };
+const DEFAULT_VOTES = 3;
 
-function simpleHash(str: string): string {
-  let h = 0;
-  for (let i = 0; i < str.length; i++) h = (Math.imul(31, h) + str.charCodeAt(i)) | 0;
-  return Math.abs(h).toString(36);
+function simpleHash(s: string): string {
+  let h = 0; for (let i=0;i<s.length;i++) h=(Math.imul(31,h)+s.charCodeAt(i))|0; return Math.abs(h).toString(36);
 }
 function uid() { return Date.now().toString(36)+Math.random().toString(36).slice(2); }
+type Draft = { text:string; area:string; impact:string };
 
-type Draft = { text: string; area: string; impact: string };
+const Footer = () => (
+  <div style={{ textAlign:"center", padding:"16px 0 10px", fontSize:10, color:"#bbb", letterSpacing:"0.5px" }}>
+    v{__APP_VERSION__} · {__GIT_HASH__} · {__GIT_DATE__}
+  </div>
+);
 
 export default function App() {
   const [screen,    setScreen]    = useState("login");
@@ -56,8 +60,17 @@ export default function App() {
   const [admins,        setAdmins]        = useState<any[]>([]);
   const [newAdminName,  setNewAdminName]  = useState("");
   const [newAdminEmail, setNewAdminEmail] = useState("");
-  const [newAdminPw,    setNewAdminPw]    = useState("");
   const [adminMsg,      setAdminMsg]      = useState("");
+
+  // Profile edit state
+  const [profileName,    setProfileName]    = useState("");
+  const [profilePwCur,   setProfilePwCur]   = useState("");
+  const [profilePwNew,   setProfilePwNew]   = useState("");
+  const [profilePwNew2,  setProfilePwNew2]  = useState("");
+  const [profileMsg,     setProfileMsg]     = useState("");
+
+  const [settings,  setSettings]  = useState<any>({ votesPerCol: DEFAULT_VOTES });
+  const [editVotes, setEditVotes] = useState(DEFAULT_VOTES);
 
   const [projects,        setProjects]        = useState<any[]>([]);
   const [selectedProject, setSelectedProject] = useState<any>(null);
@@ -69,8 +82,9 @@ export default function App() {
   const [participants, setParticipants] = useState<any[]>([]);
 
   const [saving,       setSaving]       = useState(false);
-  const [votesUsed,    setVotesUsed]    = useState<Record<string,number>>({});
+  // voted: loaded from Firestore per project, keyed by "colId-noteId"
   const [voted,        setVoted]        = useState<Record<string,boolean>>({});
+  const [votesUsed,    setVotesUsed]    = useState<Record<string,number>>({});
   const [selectedNote, setSelectedNote] = useState<any>(null);
 
   const [adminTab,    setAdminTab]    = useState("projects");
@@ -81,71 +95,94 @@ export default function App() {
   const [addingNote, setAddingNote] = useState<Record<string,boolean>>({});
   const [draftNote,  setDraftNote]  = useState<Record<string,Draft>>({});
 
-  // ── Listeners ─────────────────────────────────────────────
+  const votesPerCol = settings?.votesPerCol ?? DEFAULT_VOTES;
+
+  // ── Global listeners ──────────────────────────────────────
   useEffect(() => {
-    const unsub = onSnapshot(collection(db,"admins"), snap => {
-      const list: any[] = [];
-      snap.forEach(d => list.push({ id:d.id,...d.data() }));
-      setAdmins(list);
+    const u = onSnapshot(collection(db,"admins"), snap => {
+      const l: any[] = []; snap.forEach(d=>l.push({id:d.id,...d.data()})); setAdmins(l);
     });
-    return () => unsub();
+    return () => u();
   }, []);
 
   useEffect(() => {
-    const unsub = onSnapshot(collection(db,"projects"), snap => {
-      const list: any[] = [];
-      snap.forEach(d => list.push({ id:d.id,...d.data() }));
-      list.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
-      setProjects(list);
+    const u = onSnapshot(doc(db,"settings","global"), snap => {
+      if (snap.exists()) { setSettings(snap.data()); setEditVotes(snap.data().votesPerCol??DEFAULT_VOTES); }
     });
-    return () => unsub();
+    return () => u();
   }, []);
 
+  useEffect(() => {
+    const u = onSnapshot(collection(db,"projects"), snap => {
+      const l: any[] = []; snap.forEach(d=>l.push({id:d.id,...d.data()}));
+      l.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+      setProjects(l);
+    });
+    return () => u();
+  }, []);
+
+  // ── Project listeners ─────────────────────────────────────
   useEffect(() => {
     if (!selectedProject?.id) return;
-    const unsub = onSnapshot(doc(db,"projects",selectedProject.id), snap => {
-      if (snap.exists()) setSelectedProject((prev: any) => ({ ...prev, ...snap.data(), id: snap.id }));
+    const u = onSnapshot(doc(db,"projects",selectedProject.id), snap => {
+      if (snap.exists()) setSelectedProject((p:any)=>({...p,...snap.data(),id:snap.id}));
     });
-    return () => unsub();
+    return () => u();
   }, [selectedProject?.id]);
 
   useEffect(() => {
     if (!selectedProject?.id) return;
     const pid = selectedProject.id;
-    const unsubs = COLUMNS.map(col =>
+    const us = COLUMNS.map(col =>
       onSnapshot(collection(db,"projects",pid,"notes",col.id,"items"), snap => {
-        const items: Record<string,any> = {};
-        snap.forEach(d => { items[d.id] = { id:d.id,...d.data() }; });
-        setNotes(prev => ({ ...prev,[col.id]:items }));
+        const it: Record<string,any> = {};
+        snap.forEach(d=>{it[d.id]={id:d.id,...d.data()};});
+        setNotes(p=>({...p,[col.id]:it}));
       })
     );
     const u2 = onSnapshot(collection(db,"projects",pid,"actions"), snap => {
-      const items: Record<string,any> = {};
-      snap.forEach(d => { items[d.id] = { id:d.id,...d.data() }; });
-      setActions(items);
+      const it: Record<string,any> = {}; snap.forEach(d=>{it[d.id]={id:d.id,...d.data()};}); setActions(it);
     });
     const u3 = onSnapshot(collection(db,"projects",pid,"porques"), snap => {
-      const items: Record<string,any> = {};
-      snap.forEach(d => { items[d.id] = { id:d.id,...d.data() }; });
-      setPorques(items);
+      const it: Record<string,any> = {}; snap.forEach(d=>{it[d.id]={id:d.id,...d.data()};}); setPorques(it);
     });
     const u4 = onSnapshot(collection(db,"projects",pid,"participants"), snap => {
-      const list: any[] = [];
-      snap.forEach(d => list.push({ id:d.id,...d.data() }));
-      setParticipants(list);
+      const l: any[] = []; snap.forEach(d=>l.push({id:d.id,...d.data()})); setParticipants(l);
     });
-    return () => { unsubs.forEach(u=>u()); u2(); u3(); u4(); };
+    return () => { us.forEach(u=>u()); u2(); u3(); u4(); };
   }, [selectedProject?.id]);
+
+  // ── Load user votes from Firestore when project is selected ──
+  // Votes are stored at: projects/{pid}/uservotes/{userEmail}
+  // document shape: { "colId-noteId": true, ... }
+  useEffect(() => {
+    if (!selectedProject?.id || !userEmail) return;
+    const loadVotes = async () => {
+      const ref = doc(db,"projects",selectedProject.id,"uservotes",userEmail);
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        const data = snap.data();
+        setVoted(data);
+        // Rebuild votesUsed count per column
+        const used: Record<string,number> = {};
+        Object.keys(data).forEach(key => {
+          const colId = key.split("-")[0];
+          used[colId] = (used[colId]||0) + 1;
+        });
+        setVotesUsed(used);
+      } else {
+        setVoted({}); setVotesUsed({});
+      }
+    };
+    loadVotes();
+  }, [selectedProject?.id, userEmail]);
 
   // ── Auth ──────────────────────────────────────────────────
   const handleUserLogin = () => {
     setLoginErr("");
     if (!loginName.trim()) return setLoginErr("Ingresa tu nombre.");
     if (!loginEmail.trim()) return setLoginErr("Ingresa tu correo.");
-    setIsAdmin(false);
-    setUserName(loginName.trim());
-    setUserEmail(loginEmail.trim().toLowerCase());
-    setScreen("user");
+    setIsAdmin(false); setUserName(loginName.trim()); setUserEmail(loginEmail.trim().toLowerCase()); setScreen("user");
   };
 
   const handleAdminLogin = async () => {
@@ -153,47 +190,76 @@ export default function App() {
     const email = loginEmail.trim().toLowerCase();
     if (!email) { setLoginErr("Ingresa tu correo."); setLoginLoading(false); return; }
     if (!loginPw) { setLoginErr("Ingresa tu contraseña."); setLoginLoading(false); return; }
-    const adminDoc = await getDoc(doc(db,"admins",email));
-    if (!adminDoc.exists()) { setLoginErr("Correo no registrado como administrador."); setLoginLoading(false); return; }
-    const data = adminDoc.data();
+    const snap = await getDoc(doc(db,"admins",email));
+    if (!snap.exists()) { setLoginErr("Correo no registrado como administrador."); setLoginLoading(false); return; }
+    const data = snap.data();
     if (data.password !== loginPw && data.password !== simpleHash(loginPw)) {
       setLoginErr("Contraseña incorrecta."); setLoginLoading(false); return;
     }
     setIsAdmin(true); setUserName(data.name||email); setUserEmail(email);
+    setProfileName(data.name||"");
     setLoginLoading(false); setScreen("admin");
   };
 
   const logout = () => {
     setScreen("login"); setSelectedProject(null); setIsAdmin(false);
-    setUserName(""); setUserEmail(""); setLoginName("");
-    setLoginEmail(""); setLoginPw(""); setLoginErr("");
-    setNotes({}); setActions({}); setPorques({});
-    setVoted({}); setVotesUsed({}); setSelectedNote(null);
-    setTab("board"); setAdminTab("projects");
+    setUserName(""); setUserEmail(""); setLoginName(""); setLoginEmail(""); setLoginPw(""); setLoginErr("");
+    setNotes({}); setActions({}); setPorques({}); setVoted({}); setVotesUsed({}); setSelectedNote(null);
+    setTab("board"); setAdminTab("projects"); setProfileMsg("");
   };
 
   const joinProject = async (proj: any) => {
     setSelectedProject(proj);
-    setNotes({}); setActions({}); setPorques({});
-    setVoted({}); setVotesUsed({}); setSelectedNote(null); setTab("board");
-    await setDoc(doc(db,"projects",proj.id,"participants",userEmail),{
-      name:userName, email:userEmail, joinedAt:serverTimestamp()
-    },{ merge:true });
+    setNotes({}); setActions({}); setPorques({}); setSelectedNote(null); setTab("board");
+    // voted & votesUsed loaded by useEffect above
+    await setDoc(doc(db,"projects",proj.id,"participants",userEmail),{ name:userName, email:userEmail, joinedAt:serverTimestamp() },{ merge:true });
+  };
+
+  // ── Profile edit ──────────────────────────────────────────
+  const saveProfile = async () => {
+    setProfileMsg("");
+    if (!profileName.trim()) return setProfileMsg("⚠️ El nombre no puede estar vacío.");
+    const snap = await getDoc(doc(db,"admins",userEmail));
+    if (!snap.exists()) return setProfileMsg("⚠️ Error al cargar tu perfil.");
+    const data = snap.data();
+
+    const updates: any = { name: profileName.trim() };
+
+    if (profilePwNew || profilePwCur) {
+      if (!profilePwCur) return setProfileMsg("⚠️ Ingresa tu contraseña actual.");
+      if (data.password !== profilePwCur && data.password !== simpleHash(profilePwCur))
+        return setProfileMsg("⚠️ La contraseña actual es incorrecta.");
+      if (!profilePwNew) return setProfileMsg("⚠️ Ingresa la nueva contraseña.");
+      if (profilePwNew !== profilePwNew2) return setProfileMsg("⚠️ Las contraseñas nuevas no coinciden.");
+      updates.password = profilePwNew;
+    }
+
+    await setDoc(doc(db,"admins",userEmail), updates, { merge:true });
+    setUserName(profileName.trim());
+    setProfilePwCur(""); setProfilePwNew(""); setProfilePwNew2("");
+    setProfileMsg("✅ Perfil actualizado correctamente.");
+  };
+
+  // ── Settings ──────────────────────────────────────────────
+  const saveVotesPerCol = async () => {
+    const val = Math.max(1, Math.min(10, Number(editVotes)||DEFAULT_VOTES));
+    await setDoc(doc(db,"settings","global"),{ votesPerCol:val },{ merge:true });
   };
 
   // ── Admin management ──────────────────────────────────────
   const createAdmin = async () => {
     setAdminMsg("");
-    if (!newAdminName.trim()||!newAdminEmail.trim()||!newAdminPw.trim()) return setAdminMsg("⚠️ Completa todos los campos.");
+    if (!newAdminName.trim()||!newAdminEmail.trim()) return setAdminMsg("⚠️ Completa nombre y correo.");
     const email = newAdminEmail.trim().toLowerCase();
-    const existing = await getDoc(doc(db,"admins",email));
-    if (existing.exists()) return setAdminMsg("⚠️ Ya existe un admin con ese correo.");
+    if ((await getDoc(doc(db,"admins",email))).exists()) return setAdminMsg("⚠️ Ya existe un admin con ese correo.");
+    // Default password = email
     await setDoc(doc(db,"admins",email),{
-      name:newAdminName.trim(), email, password:newAdminPw.trim(),
+      name:newAdminName.trim(), email,
+      password:email, // plain text default = email
       createdAt:serverTimestamp(), createdBy:userEmail,
     });
-    setNewAdminName(""); setNewAdminEmail(""); setNewAdminPw("");
-    setAdminMsg("✅ Admin creado correctamente.");
+    setNewAdminName(""); setNewAdminEmail("");
+    setAdminMsg("✅ Admin creado. Contraseña por defecto: su correo electrónico.");
   };
 
   const deleteAdmin = async (email: string) => {
@@ -203,73 +269,56 @@ export default function App() {
   };
 
   // ── Project CRUD ──────────────────────────────────────────
-  const togglePhase = async (projId: string, phase: string, current: boolean) => {
-    await setDoc(doc(db,"projects",projId),{ phases:{ [phase]:!current } },{ merge:true });
-  };
+  const togglePhase = async (projId: string, phase: string, cur: boolean) =>
+    setDoc(doc(db,"projects",projId),{ phases:{ [phase]:!cur } },{ merge:true });
+
   const createProject = async () => {
     if (!newProjName.trim()) return;
-    const id = uid();
     const phases: Record<string,boolean> = {};
-    ALL_PHASES.forEach(p => { phases[p] = p==="board"; });
-    await setDoc(doc(db,"projects",id),{
-      name:newProjName.trim(), description:newProjDesc.trim(),
-      phases, createdAt:serverTimestamp(), status:"active", createdBy:userEmail
-    });
+    ALL_PHASES.forEach(p=>{ phases[p]=p==="board"; });
+    await setDoc(doc(db,"projects",uid()),{ name:newProjName.trim(), description:newProjDesc.trim(), phases, createdAt:serverTimestamp(), status:"active", createdBy:userEmail });
     setNewProjName(""); setNewProjDesc(""); setAdminTab("projects");
   };
+
   const updateProject = async () => {
     if (!editingProj) return;
-    await setDoc(doc(db,"projects",editingProj.id),{
-      name:editingProj.name, description:editingProj.description
-    },{ merge:true });
+    await setDoc(doc(db,"projects",editingProj.id),{ name:editingProj.name, description:editingProj.description },{ merge:true });
     setEditingProj(null); setAdminTab("projects");
   };
+
   const deleteProject = async (id: string) => {
     if (!confirm("¿Eliminar este proyecto?")) return;
     await setDoc(doc(db,"projects",id),{ status:"deleted" },{ merge:true });
   };
+
   const clearProjectData = async (pid: string) => {
-    if (!confirm("¿Limpiar todos los datos de este proyecto?")) return;
-    for (const col of COLUMNS) {
-      const snap = await getDocs(collection(db,"projects",pid,"notes",col.id,"items"));
-      for (const d of snap.docs) await deleteDoc(d.ref);
-    }
+    if (!confirm("¿Limpiar todos los datos?")) return;
+    for (const col of COLUMNS)
+      for (const d of (await getDocs(collection(db,"projects",pid,"notes",col.id,"items"))).docs) await deleteDoc(d.ref);
     for (const d of (await getDocs(collection(db,"projects",pid,"actions"))).docs) await deleteDoc(d.ref);
     for (const d of (await getDocs(collection(db,"projects",pid,"porques"))).docs) await deleteDoc(d.ref);
+    for (const d of (await getDocs(collection(db,"projects",pid,"uservotes"))).docs) await deleteDoc(d.ref);
     alert("✅ Datos limpiados.");
   };
+
   const exportCSV = (proj: any) => {
     const rows = [["Categoría","Texto","Autor","Área","Impacto","Votos"]];
-    COLUMNS.forEach(col => {
-      Object.values(notes[col.id]||{}).filter((n:any)=>n.text?.trim()).forEach((n:any) => {
-        rows.push([col.title,n.text,n.author,n.area,n.impact,n.votes]);
-      });
-    });
-    const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+    COLUMNS.forEach(col => Object.values(notes[col.id]||{}).filter((n:any)=>n.text?.trim()).forEach((n:any)=>rows.push([col.title,n.text,n.author,n.area,n.impact,n.votes])));
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
-    a.download = `RCA-${proj.name}-export.csv`; a.click();
+    a.href = URL.createObjectURL(new Blob([rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n")],{type:"text/csv"}));
+    a.download = `RCA-${proj.name}.csv`; a.click();
   };
 
   // ── Note helpers ──────────────────────────────────────────
-  const openDraft = (colId: string) => {
-    setAddingNote(v=>({...v,[colId]:true}));
-    setDraftNote(v=>({...v,[colId]:{text:"",area:"",impact:""}}));
-  };
-  const cancelDraft = (colId: string) => setAddingNote(v=>({...v,[colId]:false}));
-
-  const draftValid = (colId: string) => {
-    const d = draftNote[colId];
-    return !!(d?.text?.trim() && d?.area && d?.impact);
-  };
+  const openDraft   = (c: string) => { setAddingNote(v=>({...v,[c]:true})); setDraftNote(v=>({...v,[c]:{text:"",area:"",impact:""}})); };
+  const cancelDraft = (c: string) => setAddingNote(v=>({...v,[c]:false}));
+  const draftValid  = (c: string) => { const d=draftNote[c]; return !!(d?.text?.trim()&&d?.area&&d?.impact); };
 
   const saveDraft = async (colId: string) => {
-    if (!draftValid(colId) || !selectedProject) return;
-    const draft = draftNote[colId];
+    if (!draftValid(colId)||!selectedProject) return;
+    const d = draftNote[colId];
     await setDoc(doc(db,"projects",selectedProject.id,"notes",colId,"items",uid()),{
-      text:draft.text.trim(), author:userName,
-      impact:draft.impact, area:draft.area,
-      votes:0, createdAt:Date.now()
+      text:d.text.trim(), author:userName, impact:d.impact, area:d.area, votes:0, createdAt:Date.now()
     });
     setAddingNote(v=>({...v,[colId]:false}));
   };
@@ -280,31 +329,42 @@ export default function App() {
     await setDoc(doc(db,"projects",selectedProject.id,"notes",colId,"items",id),{ [field]:val },{ merge:true });
     setSaving(false);
   };
+
   const removeNote = async (colId: string, id: string) => {
     if (!selectedProject) return;
     await deleteDoc(doc(db,"projects",selectedProject.id,"notes",colId,"items",id));
   };
 
-  // ── Vote helpers ──────────────────────────────────────────
+  // ── Vote — persistent per user in Firestore ───────────────
   const voteNote = async (colId: string, noteId: string) => {
     if (!selectedProject) return;
     const key = `${colId}-${noteId}`;
     if (voted[key]) return;
     const used = votesUsed[colId]||0;
-    if (used >= VOTES_PER_COL) return;
-    setVoted(v=>({...v,[key]:true}));
-    setVotesUsed(v=>({...v,[colId]:used+1}));
-    const ref = doc(db,"projects",selectedProject.id,"notes",colId,"items",noteId);
-    const snap = await getDoc(ref);
-    if (snap.exists()) await setDoc(ref,{ votes:(snap.data().votes||0)+1 },{ merge:true });
+    if (used >= votesPerCol) return;
+
+    const newVoted = { ...voted, [key]: true };
+    const newUsed  = { ...votesUsed, [colId]: used+1 };
+    setVoted(newVoted);
+    setVotesUsed(newUsed);
+
+    // Persist user votes so they survive reconnects
+    await setDoc(
+      doc(db,"projects",selectedProject.id,"uservotes",userEmail),
+      { [key]: true },
+      { merge: true }
+    );
+    // Atomic increment visible to all in real time
+    await updateDoc(
+      doc(db,"projects",selectedProject.id,"notes",colId,"items",noteId),
+      { votes: increment(1) }
+    );
   };
 
   // ── Action helpers ────────────────────────────────────────
   const addAction = async () => {
     if (!selectedProject) return;
-    await setDoc(doc(db,"projects",selectedProject.id,"actions",uid()),{
-      what:"", who:"", when:"", priority:"🔴 Alta", createdAt:Date.now()
-    });
+    await setDoc(doc(db,"projects",selectedProject.id,"actions",uid()),{ what:"", who:"", when:"", priority:"🔴 Alta", createdAt:Date.now() });
   };
   const updateAction = async (id: string, field: string, val: string) => {
     if (!selectedProject) return;
@@ -316,20 +376,20 @@ export default function App() {
   };
 
   // ── Porqués helpers ───────────────────────────────────────
-  const savePorque = async (noteId: string, index: number, val: string) => {
+  const savePorque = async (noteId: string, idx: number, val: string) => {
     if (!selectedProject) return;
     const ref = doc(db,"projects",selectedProject.id,"porques",noteId);
     const snap = await getDoc(ref);
-    const current = snap.exists() ? (snap.data().whys||["","","","",""]) : ["","","","",""];
-    const updated = [...current]; updated[index] = val;
-    await setDoc(ref,{ whys:updated },{ merge:true });
+    const w = snap.exists() ? [...(snap.data().whys||["","","","",""])] : ["","","","",""];
+    w[idx] = val;
+    await setDoc(ref,{ whys:w },{ merge:true });
   };
+
   const createActionFromCause = async (note: any, causeText: string) => {
     if (!selectedProject) return;
     await setDoc(doc(db,"projects",selectedProject.id,"actions",uid()),{
       what:causeText, who:"", when:"", priority:"🔴 Alta",
-      createdAt:Date.now(), fromCause:note.id,
-      problem:note.text.slice(0,80), colOrigin:note.col
+      createdAt:Date.now(), fromCause:note.id, problem:note.text.slice(0,80)
     });
     setTab("acciones");
   };
@@ -342,35 +402,34 @@ export default function App() {
   const activePhases = isAdmin ? ALL_PHASES : ALL_PHASES.filter(p=>selectedProject?.phases?.[p]);
 
   const hBtn = (active=false): React.CSSProperties => ({
-    background:active?"#fff":"rgba(255,255,255,0.15)",
-    color:active?"#1565C0":"#fff",
-    border:"none", borderRadius:20, padding:"5px 14px",
-    fontSize:12, cursor:"pointer", fontWeight:active?700:400
+    background:active?"#fff":"rgba(255,255,255,0.15)", color:active?"#1565C0":"#fff",
+    border:"none", borderRadius:20, padding:"5px 14px", fontSize:12, cursor:"pointer", fontWeight:active?700:400
+  });
+
+  const inp = (extra?: React.CSSProperties): React.CSSProperties => ({
+    width:"100%", padding:"10px 12px", borderRadius:8, border:"1.5px solid #e0e0e0",
+    fontSize:14, boxSizing:"border-box", marginTop:4, ...extra
   });
 
   // ════════════════════════════════════════════════════════
   // LOGIN
   // ════════════════════════════════════════════════════════
   if (screen==="login") return (
-    <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#1565C0,#0D47A1)", display:"flex", alignItems:"center", justifyContent:"center" }}>
+    <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#1565C0,#0D47A1)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" }}>
       <div style={{ background:"#fff", borderRadius:20, padding:40, maxWidth:420, width:"90%", boxShadow:"0 8px 40px rgba(0,0,0,0.2)" }}>
         <div style={{ textAlign:"center", marginBottom:32 }}>
           <div style={{ fontSize:52 }}>🪨</div>
           <h2 style={{ margin:"8px 0 4px", color:"#1a237e" }}>RCA Platform</h2>
-          <p style={{ color:"#888", fontSize:13, margin:0 }}>Lecciones Aprendidas · BHP</p>
-          <p style={{ color:"#bbb", fontSize:11, margin:"4px 0 0" }}>v{__APP_VERSION__} · {__GIT_HASH__} · {__GIT_DATE__}</p>
         </div>
         <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
           <div>
             <label style={{ fontSize:12, color:"#555", fontWeight:600 }}>Tu nombre</label>
-            <input value={loginName} onChange={e=>setLoginName(e.target.value)} placeholder="Nombre completo"
-              style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1.5px solid #e0e0e0", fontSize:14, boxSizing:"border-box", marginTop:4 }} />
+            <input value={loginName} onChange={e=>setLoginName(e.target.value)} placeholder="Nombre completo" style={inp()} />
           </div>
           <div>
             <label style={{ fontSize:12, color:"#555", fontWeight:600 }}>Correo electrónico</label>
             <input value={loginEmail} onChange={e=>setLoginEmail(e.target.value)} placeholder="tu@correo.com" type="email"
-              onKeyDown={e=>e.key==="Enter"&&handleUserLogin()}
-              style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1.5px solid #e0e0e0", fontSize:14, boxSizing:"border-box", marginTop:4 }} />
+              onKeyDown={e=>e.key==="Enter"&&handleUserLogin()} style={inp()} />
           </div>
           {loginErr && <div style={{ background:"#FFEBEE", color:"#c62828", borderRadius:8, padding:"8px 12px", fontSize:13 }}>⚠️ {loginErr}</div>}
           <button onClick={handleUserLogin}
@@ -378,9 +437,7 @@ export default function App() {
             Ingresar →
           </button>
           <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-            <div style={{ flex:1, height:1, background:"#eee" }} />
-            <span style={{ fontSize:12, color:"#bbb" }}>o</span>
-            <div style={{ flex:1, height:1, background:"#eee" }} />
+            <div style={{ flex:1, height:1, background:"#eee" }} /><span style={{ fontSize:12, color:"#bbb" }}>o</span><div style={{ flex:1, height:1, background:"#eee" }} />
           </div>
           <button onClick={()=>{ setLoginErr(""); setLoginEmail(""); setLoginPw(""); setScreen("adminLogin"); }}
             style={{ background:"transparent", color:"#1a237e", border:"1.5px solid #1a237e", borderRadius:8, padding:"11px", fontSize:14, cursor:"pointer", fontWeight:600 }}>
@@ -388,6 +445,7 @@ export default function App() {
           </button>
         </div>
       </div>
+      <Footer />
     </div>
   );
 
@@ -395,24 +453,22 @@ export default function App() {
   // ADMIN LOGIN
   // ════════════════════════════════════════════════════════
   if (screen==="adminLogin") return (
-    <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#1a237e,#283593)", display:"flex", alignItems:"center", justifyContent:"center" }}>
+    <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#1a237e,#283593)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" }}>
       <div style={{ background:"#fff", borderRadius:20, padding:40, maxWidth:400, width:"90%", boxShadow:"0 8px 40px rgba(0,0,0,0.25)" }}>
         <div style={{ textAlign:"center", marginBottom:28 }}>
           <div style={{ fontSize:44 }}>🔑</div>
           <h2 style={{ margin:"8px 0 4px", color:"#1a237e" }}>Acceso Administrador</h2>
-          <p style={{ color:"#888", fontSize:13, margin:0 }}>RCA Platform · BHP</p>
+          <p style={{ color:"#888", fontSize:13, margin:0 }}>RCA Platform</p>
         </div>
         <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
           <div>
             <label style={{ fontSize:12, color:"#555", fontWeight:600 }}>Correo electrónico</label>
-            <input value={loginEmail} onChange={e=>setLoginEmail(e.target.value)} placeholder="admin@correo.com" type="email"
-              style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1.5px solid #e0e0e0", fontSize:14, boxSizing:"border-box", marginTop:4 }} />
+            <input value={loginEmail} onChange={e=>setLoginEmail(e.target.value)} placeholder="admin@correo.com" type="email" style={inp()} />
           </div>
           <div>
             <label style={{ fontSize:12, color:"#555", fontWeight:600 }}>Contraseña</label>
             <input value={loginPw} onChange={e=>setLoginPw(e.target.value)} type="password" placeholder="••••••••"
-              onKeyDown={e=>e.key==="Enter"&&handleAdminLogin()}
-              style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1.5px solid #e0e0e0", fontSize:14, boxSizing:"border-box", marginTop:4 }} />
+              onKeyDown={e=>e.key==="Enter"&&handleAdminLogin()} style={inp()} />
           </div>
           {loginErr && <div style={{ background:"#FFEBEE", color:"#c62828", borderRadius:8, padding:"8px 12px", fontSize:13 }}>⚠️ {loginErr}</div>}
           <button onClick={handleAdminLogin} disabled={loginLoading}
@@ -420,11 +476,10 @@ export default function App() {
             {loginLoading?"Verificando...":"Entrar como Admin →"}
           </button>
           <button onClick={()=>{ setScreen("login"); setLoginErr(""); setLoginEmail(""); setLoginPw(""); }}
-            style={{ background:"transparent", color:"#888", border:"none", fontSize:13, cursor:"pointer", padding:"6px" }}>
-            ← Volver al inicio
-          </button>
+            style={{ background:"transparent", color:"#888", border:"none", fontSize:13, cursor:"pointer", padding:"6px" }}>← Volver</button>
         </div>
       </div>
+      <Footer />
     </div>
   );
 
@@ -432,36 +487,30 @@ export default function App() {
   // ADMIN PANEL
   // ════════════════════════════════════════════════════════
   if (screen==="admin") return (
-    <div style={{ minHeight:"100vh", background:"#f0f4f8", fontFamily:"'Segoe UI',sans-serif" }}>
+    <div style={{ minHeight:"100vh", background:"#f0f4f8", fontFamily:"'Segoe UI',sans-serif", display:"flex", flexDirection:"column" }}>
       <div style={{ background:"#1a237e", color:"#fff", padding:"14px 24px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          <span style={{ fontSize:18, fontWeight:700 }}>🪨 RCA Platform · Admin</span>
-          <span style={{ fontSize:11, opacity:0.5 }}>v{__APP_VERSION__} · {__GIT_HASH__}</span>
-        </div>
+        <span style={{ fontSize:18, fontWeight:700 }}>🪨 RCA Platform · Admin</span>
         <div style={{ display:"flex", gap:8, alignItems:"center" }}>
           <span style={{ fontSize:13, opacity:0.8 }}>🔑 {userName} · {userEmail}</span>
           <button onClick={logout} style={{ background:"rgba(255,255,255,0.15)", color:"#fff", border:"none", borderRadius:20, padding:"6px 16px", fontSize:13, cursor:"pointer" }}>Cerrar sesión</button>
         </div>
       </div>
-      <div style={{ background:"#fff", borderBottom:"1px solid #e0e0e0", padding:"0 24px", display:"flex", gap:4 }}>
-        {([["projects","📋 Proyectos"],["new","➕ Nuevo Proyecto"],["admins","👥 Gestionar Admins"]] as [string,string][]).map(([t,label])=>(
-          <button key={t} onClick={()=>{ setAdminTab(t); setEditingProj(null); }}
+      <div style={{ background:"#fff", borderBottom:"1px solid #e0e0e0", padding:"0 24px", display:"flex", gap:4, flexWrap:"wrap" }}>
+        {([["projects","📋 Proyectos"],["new","➕ Nuevo"],["admins","👥 Admins"],["settings","⚙️ Configuración"],["profile","👤 Mi Perfil"]] as [string,string][]).map(([t,label])=>(
+          <button key={t} onClick={()=>{ setAdminTab(t); setEditingProj(null); setAdminMsg(""); setProfileMsg(""); }}
             style={{ background:"none", border:"none", borderBottom:adminTab===t?"3px solid #1565C0":"3px solid transparent", color:adminTab===t?"#1565C0":"#555", padding:"14px 16px", fontSize:14, cursor:"pointer", fontWeight:adminTab===t?700:400 }}>
             {label}
           </button>
         ))}
-        {editingProj && (
-          <button style={{ background:"none", border:"none", borderBottom:"3px solid #F9A825", color:"#F9A825", padding:"14px 16px", fontSize:14, cursor:"pointer", fontWeight:700 }}>
-            ✏️ Editando: {editingProj.name}
-          </button>
-        )}
+        {editingProj && <button style={{ background:"none", border:"none", borderBottom:"3px solid #F9A825", color:"#F9A825", padding:"14px 16px", fontSize:14, cursor:"pointer", fontWeight:700 }}>✏️ {editingProj.name}</button>}
       </div>
-      <div style={{ padding:24 }}>
+
+      <div style={{ padding:24, flex:1 }}>
+
+        {/* Projects */}
         {adminTab==="projects" && (
           <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-            {projects.filter(p=>p.status!=="deleted").length===0 && (
-              <div style={{ background:"#fff", borderRadius:12, padding:40, textAlign:"center", color:"#aaa" }}>No hay proyectos aún.</div>
-            )}
+            {projects.filter(p=>p.status!=="deleted").length===0 && <div style={{ background:"#fff", borderRadius:12, padding:40, textAlign:"center", color:"#aaa" }}>No hay proyectos aún.</div>}
             {projects.filter(p=>p.status!=="deleted").map(proj=>(
               <div key={proj.id} style={{ background:"#fff", borderRadius:12, padding:20, boxShadow:"0 2px 8px rgba(0,0,0,0.08)" }}>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14, flexWrap:"wrap", gap:8 }}>
@@ -470,53 +519,39 @@ export default function App() {
                     <p style={{ margin:0, fontSize:13, color:"#777" }}>{proj.description||"Sin descripción"}</p>
                   </div>
                   <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                    <button onClick={()=>{ setEditingProj({...proj}); setAdminTab("edit"); }}
-                      style={{ background:"#E3F2FD", color:"#1565C0", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:12 }}>✏️ Editar</button>
-                    <button onClick={()=>{ joinProject(proj); setScreen("user"); }}
-                      style={{ background:"#1a237e", color:"#fff", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:12 }}>🚀 Entrar al board</button>
-                    <button onClick={()=>exportCSV(proj)}
-                      style={{ background:"#E8F5E9", color:"#2E7D32", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:12 }}>📥 CSV</button>
-                    <button onClick={()=>clearProjectData(proj.id)}
-                      style={{ background:"#FFF8E1", color:"#E65100", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:12 }}>🗑️ Limpiar</button>
-                    <button onClick={()=>deleteProject(proj.id)}
-                      style={{ background:"#FFEBEE", color:"#c62828", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:12 }}>✕ Eliminar</button>
+                    <button onClick={()=>{ setEditingProj({...proj}); setAdminTab("edit"); }} style={{ background:"#E3F2FD", color:"#1565C0", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:12 }}>✏️ Editar</button>
+                    <button onClick={()=>{ joinProject(proj); setScreen("user"); }} style={{ background:"#1a237e", color:"#fff", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:12 }}>🚀 Entrar</button>
+                    <button onClick={()=>exportCSV(proj)} style={{ background:"#E8F5E9", color:"#2E7D32", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:12 }}>📥 CSV</button>
+                    <button onClick={()=>clearProjectData(proj.id)} style={{ background:"#FFF8E1", color:"#E65100", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:12 }}>🗑️ Limpiar</button>
+                    <button onClick={()=>deleteProject(proj.id)} style={{ background:"#FFEBEE", color:"#c62828", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:12 }}>✕ Eliminar</button>
                   </div>
                 </div>
-                <div>
-                  <div style={{ fontSize:11, color:"#555", fontWeight:600, marginBottom:6 }}>FASES ACTIVAS:</div>
-                  <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                    {ALL_PHASES.map(phase=>{
-                      const active = proj.phases?.[phase]||false;
-                      return (
-                        <button key={phase} onClick={()=>togglePhase(proj.id,phase,active)}
-                          style={{ background:active?"#1565C0":"#eee", color:active?"#fff":"#888", border:"none", borderRadius:20, padding:"5px 14px", fontSize:12, cursor:"pointer", fontWeight:active?700:400, transition:"all 0.2s" }}>
-                          {PHASE_LABELS[phase]} {active?"✓":"○"}
-                        </button>
-                      );
-                    })}
-                  </div>
+                <div style={{ fontSize:11, color:"#555", fontWeight:600, marginBottom:6 }}>FASES ACTIVAS:</div>
+                <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                  {ALL_PHASES.map(phase=>{
+                    const active=proj.phases?.[phase]||false;
+                    return <button key={phase} onClick={()=>togglePhase(proj.id,phase,active)}
+                      style={{ background:active?"#1565C0":"#eee", color:active?"#fff":"#888", border:"none", borderRadius:20, padding:"5px 14px", fontSize:12, cursor:"pointer", fontWeight:active?700:400, transition:"all 0.2s" }}>
+                      {PHASE_LABELS[phase]} {active?"✓":"○"}
+                    </button>;
+                  })}
                 </div>
               </div>
             ))}
           </div>
         )}
+
+        {/* New project */}
         {adminTab==="new" && (
           <div style={{ background:"#fff", borderRadius:12, padding:28, maxWidth:500, boxShadow:"0 2px 8px rgba(0,0,0,0.08)" }}>
             <h3 style={{ margin:"0 0 20px", color:"#1a237e" }}>➕ Crear Nuevo Proyecto</h3>
             <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-              <div>
-                <label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Nombre *</label>
-                <input value={newProjName} onChange={e=>setNewProjName(e.target.value)} placeholder="Ej: Mina Norte Q1 2025"
-                  style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1.5px solid #e0e0e0", fontSize:14, boxSizing:"border-box", marginTop:4 }} />
-              </div>
-              <div>
-                <label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Descripción</label>
+              <div><label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Nombre *</label>
+                <input value={newProjName} onChange={e=>setNewProjName(e.target.value)} placeholder="Nombre del proyecto" style={inp()} /></div>
+              <div><label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Descripción</label>
                 <textarea value={newProjDesc} onChange={e=>setNewProjDesc(e.target.value)} rows={3} placeholder="Contexto del proyecto..."
-                  style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1.5px solid #e0e0e0", fontSize:14, boxSizing:"border-box", marginTop:4, resize:"vertical", fontFamily:"inherit" }} />
-              </div>
-              <div style={{ background:"#E3F2FD", borderRadius:8, padding:12, fontSize:13, color:"#0D47A1" }}>
-                💡 Se creará con solo el Board activo.
-              </div>
+                  style={{ ...inp(), resize:"vertical", fontFamily:"inherit" } as any} /></div>
+              <div style={{ background:"#E3F2FD", borderRadius:8, padding:12, fontSize:13, color:"#0D47A1" }}>💡 Se creará con solo el Board activo.</div>
               <button onClick={createProject} disabled={!newProjName.trim()}
                 style={{ background:newProjName.trim()?"#1565C0":"#ccc", color:"#fff", border:"none", borderRadius:8, padding:"12px", fontSize:15, cursor:newProjName.trim()?"pointer":"default", fontWeight:700 }}>
                 Crear Proyecto →
@@ -524,32 +559,31 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {/* Edit project */}
         {adminTab==="edit" && editingProj && (
           <div style={{ background:"#fff", borderRadius:12, padding:28, maxWidth:500, boxShadow:"0 2px 8px rgba(0,0,0,0.08)" }}>
             <h3 style={{ margin:"0 0 20px", color:"#1a237e" }}>✏️ Editar Proyecto</h3>
             <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-              <div>
-                <label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Nombre</label>
-                <input value={editingProj.name} onChange={e=>setEditingProj({...editingProj,name:e.target.value})}
-                  style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1.5px solid #e0e0e0", fontSize:14, boxSizing:"border-box", marginTop:4 }} />
-              </div>
-              <div>
-                <label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Descripción</label>
+              <div><label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Nombre</label>
+                <input value={editingProj.name} onChange={e=>setEditingProj({...editingProj,name:e.target.value})} style={inp()} /></div>
+              <div><label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Descripción</label>
                 <textarea value={editingProj.description||""} onChange={e=>setEditingProj({...editingProj,description:e.target.value})} rows={3}
-                  style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1.5px solid #e0e0e0", fontSize:14, boxSizing:"border-box", marginTop:4, resize:"vertical", fontFamily:"inherit" }} />
-              </div>
+                  style={{ ...inp(), resize:"vertical", fontFamily:"inherit" } as any} /></div>
               <div style={{ display:"flex", gap:8 }}>
-                <button onClick={updateProject} style={{ flex:1, background:"#1565C0", color:"#fff", border:"none", borderRadius:8, padding:"12px", fontSize:14, cursor:"pointer", fontWeight:700 }}>Guardar cambios</button>
+                <button onClick={updateProject} style={{ flex:1, background:"#1565C0", color:"#fff", border:"none", borderRadius:8, padding:"12px", fontSize:14, cursor:"pointer", fontWeight:700 }}>Guardar</button>
                 <button onClick={()=>{ setEditingProj(null); setAdminTab("projects"); }} style={{ background:"#eee", color:"#555", border:"none", borderRadius:8, padding:"12px 20px", fontSize:14, cursor:"pointer" }}>Cancelar</button>
               </div>
             </div>
           </div>
         )}
+
+        {/* Admins */}
         {adminTab==="admins" && (
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, maxWidth:900 }}>
             <div style={{ background:"#fff", borderRadius:12, padding:24, boxShadow:"0 2px 8px rgba(0,0,0,0.08)" }}>
               <h3 style={{ margin:"0 0 16px", color:"#1a237e" }}>👥 Administradores activos</h3>
-              {admins.length===0 && <p style={{ color:"#aaa", fontSize:13 }}>No hay admins registrados.</p>}
+              {admins.length===0 && <p style={{ color:"#aaa", fontSize:13 }}>No hay admins.</p>}
               {admins.map(a=>(
                 <div key={a.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderBottom:"1px solid #f0f0f0" }}>
                   <div>
@@ -565,40 +599,86 @@ export default function App() {
               ))}
             </div>
             <div style={{ background:"#fff", borderRadius:12, padding:24, boxShadow:"0 2px 8px rgba(0,0,0,0.08)" }}>
-              <h3 style={{ margin:"0 0 16px", color:"#1a237e" }}>➕ Agregar Administrador</h3>
+              <h3 style={{ margin:"0 0 8px", color:"#1a237e" }}>➕ Agregar Administrador</h3>
+              <p style={{ margin:"0 0 16px", fontSize:12, color:"#888" }}>La contraseña por defecto será el correo del nuevo admin.</p>
               <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-                <div>
-                  <label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Nombre completo</label>
-                  <input value={newAdminName} onChange={e=>setNewAdminName(e.target.value)} placeholder="Nombre del admin"
-                    style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1.5px solid #e0e0e0", fontSize:14, boxSizing:"border-box", marginTop:4 }} />
-                </div>
-                <div>
-                  <label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Correo electrónico</label>
-                  <input value={newAdminEmail} onChange={e=>setNewAdminEmail(e.target.value)} placeholder="admin@correo.com" type="email"
-                    style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1.5px solid #e0e0e0", fontSize:14, boxSizing:"border-box", marginTop:4 }} />
-                </div>
-                <div>
-                  <label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Contraseña</label>
-                  <input value={newAdminPw} onChange={e=>setNewAdminPw(e.target.value)} type="password" placeholder="Mínimo 6 caracteres"
-                    style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1.5px solid #e0e0e0", fontSize:14, boxSizing:"border-box", marginTop:4 }} />
-                </div>
-                {adminMsg && (
-                  <div style={{ background:adminMsg.startsWith("✅")?"#E8F5E9":"#FFEBEE", color:adminMsg.startsWith("✅")?"#2E7D32":"#c62828", borderRadius:8, padding:"8px 12px", fontSize:13 }}>
-                    {adminMsg}
-                  </div>
-                )}
-                <button onClick={createAdmin}
-                  style={{ background:"#1a237e", color:"#fff", border:"none", borderRadius:8, padding:"12px", fontSize:14, cursor:"pointer", fontWeight:700 }}>
-                  Crear Admin →
-                </button>
-                <div style={{ background:"#FFF8E1", borderRadius:8, padding:10, fontSize:12, color:"#E65100" }}>
-                  ⚠️ Contraseña guardada en texto plano. Para producción usa Firebase Authentication.
-                </div>
+                <div><label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Nombre completo</label>
+                  <input value={newAdminName} onChange={e=>setNewAdminName(e.target.value)} placeholder="Nombre del admin" style={inp()} /></div>
+                <div><label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Correo electrónico</label>
+                  <input value={newAdminEmail} onChange={e=>setNewAdminEmail(e.target.value)} placeholder="admin@correo.com" type="email" style={inp()} /></div>
+                {adminMsg && <div style={{ background:adminMsg.startsWith("✅")?"#E8F5E9":"#FFEBEE", color:adminMsg.startsWith("✅")?"#2E7D32":"#c62828", borderRadius:8, padding:"8px 12px", fontSize:13 }}>{adminMsg}</div>}
+                <button onClick={createAdmin} style={{ background:"#1a237e", color:"#fff", border:"none", borderRadius:8, padding:"12px", fontSize:14, cursor:"pointer", fontWeight:700 }}>Crear Admin →</button>
               </div>
             </div>
           </div>
         )}
+
+        {/* Settings */}
+        {adminTab==="settings" && (
+          <div style={{ maxWidth:500 }}>
+            <div style={{ background:"#fff", borderRadius:12, padding:28, boxShadow:"0 2px 8px rgba(0,0,0,0.08)" }}>
+              <h3 style={{ margin:"0 0 6px", color:"#1a237e" }}>⚙️ Configuración Global</h3>
+              <p style={{ margin:"0 0 24px", fontSize:13, color:"#777" }}>Aplica a todos los proyectos de la plataforma.</p>
+              <label style={{ fontSize:13, fontWeight:700, color:"#333", display:"block", marginBottom:6 }}>🗳️ Votos por categoría por usuario</label>
+              <p style={{ fontSize:12, color:"#888", margin:"0 0 12px" }}>
+                Cada participante tendrá <strong>{editVotes}</strong> votos por categoría — <strong>{editVotes*4} votos totales</strong>.
+              </p>
+              <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:16 }}>
+                <button onClick={()=>setEditVotes(v=>Math.max(1,v-1))} style={{ background:"#eee", border:"none", borderRadius:8, width:36, height:36, fontSize:20, cursor:"pointer", fontWeight:700 }}>−</button>
+                <span style={{ fontSize:32, fontWeight:800, color:"#1a237e", minWidth:40, textAlign:"center" }}>{editVotes}</span>
+                <button onClick={()=>setEditVotes(v=>Math.min(10,v+1))} style={{ background:"#eee", border:"none", borderRadius:8, width:36, height:36, fontSize:20, cursor:"pointer", fontWeight:700 }}>+</button>
+                <span style={{ fontSize:12, color:"#aaa" }}>máx. 10</span>
+              </div>
+              <div style={{ background:"#F8FBFF", borderRadius:8, padding:12, marginBottom:16, fontSize:13, color:"#555" }}>
+                Actual: <strong>{votesPerCol} votos / categoría</strong>
+              </div>
+              {editVotes!==votesPerCol && <div style={{ fontSize:12, color:"#F9A825", marginBottom:10 }}>⚠️ Cambios sin guardar.</div>}
+              <button onClick={saveVotesPerCol} style={{ background:"#1565C0", color:"#fff", border:"none", borderRadius:8, padding:"12px 24px", fontSize:14, cursor:"pointer", fontWeight:700 }}>💾 Guardar</button>
+            </div>
+          </div>
+        )}
+
+        {/* My Profile */}
+        {adminTab==="profile" && (
+          <div style={{ maxWidth:500 }}>
+            <div style={{ background:"#fff", borderRadius:12, padding:28, boxShadow:"0 2px 8px rgba(0,0,0,0.08)" }}>
+              <h3 style={{ margin:"0 0 6px", color:"#1a237e" }}>👤 Mi Perfil</h3>
+              <p style={{ margin:"0 0 20px", fontSize:13, color:"#777" }}>Actualiza tu nombre y contraseña de acceso.</p>
+              <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                <div>
+                  <label style={{ fontSize:12, fontWeight:600, color:"#555" }}>Nombre</label>
+                  <input value={profileName} onChange={e=>setProfileName(e.target.value)} placeholder="Tu nombre" style={inp()} />
+                </div>
+                <div>
+                  <label style={{ fontSize:12, color:"#888" }}>Correo (no editable)</label>
+                  <input value={userEmail} disabled style={{ ...inp(), background:"#f5f5f5", color:"#aaa", cursor:"default" }} />
+                </div>
+                <div style={{ borderTop:"1px solid #eee", paddingTop:16, marginTop:4 }}>
+                  <p style={{ margin:"0 0 12px", fontSize:13, fontWeight:600, color:"#555" }}>Cambiar contraseña <span style={{ fontWeight:400, color:"#aaa" }}>(opcional)</span></p>
+                  <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                    <div><label style={{ fontSize:12, color:"#555" }}>Contraseña actual</label>
+                      <input value={profilePwCur} onChange={e=>setProfilePwCur(e.target.value)} type="password" placeholder="••••••••" style={inp()} /></div>
+                    <div><label style={{ fontSize:12, color:"#555" }}>Nueva contraseña</label>
+                      <input value={profilePwNew} onChange={e=>setProfilePwNew(e.target.value)} type="password" placeholder="••••••••" style={inp()} /></div>
+                    <div><label style={{ fontSize:12, color:"#555" }}>Confirmar nueva contraseña</label>
+                      <input value={profilePwNew2} onChange={e=>setProfilePwNew2(e.target.value)} type="password" placeholder="••••••••" style={inp()} /></div>
+                  </div>
+                </div>
+                {profileMsg && (
+                  <div style={{ background:profileMsg.startsWith("✅")?"#E8F5E9":"#FFEBEE", color:profileMsg.startsWith("✅")?"#2E7D32":"#c62828", borderRadius:8, padding:"8px 12px", fontSize:13 }}>
+                    {profileMsg}
+                  </div>
+                )}
+                <button onClick={saveProfile} style={{ background:"#1565C0", color:"#fff", border:"none", borderRadius:8, padding:"12px", fontSize:14, cursor:"pointer", fontWeight:700 }}>
+                  💾 Guardar cambios
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
+      <Footer />
     </div>
   );
 
@@ -606,7 +686,7 @@ export default function App() {
   // USER — Project selection
   // ════════════════════════════════════════════════════════
   if (!selectedProject) return (
-    <div style={{ minHeight:"100vh", background:"#f0f4f8", fontFamily:"'Segoe UI',sans-serif" }}>
+    <div style={{ minHeight:"100vh", background:"#f0f4f8", fontFamily:"'Segoe UI',sans-serif", display:"flex", flexDirection:"column" }}>
       <div style={{ background:"#1565C0", color:"#fff", padding:"14px 24px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
         <span style={{ fontSize:18, fontWeight:700 }}>🪨 RCA Platform</span>
         <div style={{ display:"flex", gap:8, alignItems:"center" }}>
@@ -614,12 +694,10 @@ export default function App() {
           <button onClick={logout} style={{ background:"rgba(255,255,255,0.15)", color:"#fff", border:"none", borderRadius:20, padding:"6px 14px", fontSize:13, cursor:"pointer" }}>Salir</button>
         </div>
       </div>
-      <div style={{ padding:32, maxWidth:700, margin:"0 auto" }}>
+      <div style={{ padding:32, maxWidth:700, margin:"0 auto", flex:1, width:"100%", boxSizing:"border-box" }}>
         <h2 style={{ color:"#1a237e", marginBottom:6 }}>Hola, {userName} 👋</h2>
         <p style={{ color:"#666", marginBottom:24, fontSize:15 }}>Selecciona el proyecto en el que vas a participar:</p>
-        {projects.filter(p=>p.status!=="deleted").length===0 && (
-          <div style={{ background:"#fff", borderRadius:12, padding:32, textAlign:"center", color:"#aaa" }}>No hay proyectos disponibles.</div>
-        )}
+        {projects.filter(p=>p.status!=="deleted").length===0 && <div style={{ background:"#fff", borderRadius:12, padding:32, textAlign:"center", color:"#aaa" }}>No hay proyectos disponibles.</div>}
         <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
           {projects.filter(p=>p.status!=="deleted").map(proj=>(
             <div key={proj.id} onClick={()=>joinProject(proj)}
@@ -642,6 +720,7 @@ export default function App() {
           ))}
         </div>
       </div>
+      <Footer />
     </div>
   );
 
@@ -649,38 +728,31 @@ export default function App() {
   // BOARD
   // ════════════════════════════════════════════════════════
   return (
-    <div style={{ minHeight:"100vh", background:"#f0f4f8", fontFamily:"'Segoe UI',sans-serif" }}>
+    <div style={{ minHeight:"100vh", background:"#f0f4f8", fontFamily:"'Segoe UI',sans-serif", display:"flex", flexDirection:"column" }}>
       <div style={{ background:"#1565C0", color:"#fff", padding:"12px 24px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:8 }}>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
           <button onClick={()=>{ setSelectedProject(null); if(isAdmin) setScreen("admin"); }} style={hBtn()}>
             {isAdmin?"← Panel Admin":"← Proyectos"}
           </button>
           <span style={{ fontSize:15, fontWeight:700 }}>🪨 {selectedProject?.name}</span>
-          <span style={{ fontSize:10, opacity:0.5 }}>v{__APP_VERSION__} · {__GIT_HASH__}</span>
           {isAdmin && <span style={{ background:"#F9A825", color:"#fff", borderRadius:12, padding:"2px 10px", fontSize:11, fontWeight:700 }}>🔑 Admin</span>}
           {saving && <span style={{ fontSize:11, opacity:0.7 }}>💾 guardando...</span>}
         </div>
         <div style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
           <span style={{ background:"rgba(255,255,255,0.15)", borderRadius:20, padding:"4px 12px", fontSize:12 }}>👤 {userName}</span>
-          {activePhases.map(t=>(
-            <button key={t} onClick={()=>setTab(t)} style={hBtn(tab===t)}>{PHASE_LABELS[t]}</button>
-          ))}
+          {activePhases.map(t=><button key={t} onClick={()=>setTab(t)} style={hBtn(tab===t)}>{PHASE_LABELS[t]}</button>)}
           <button onClick={logout} style={hBtn()}>Salir</button>
         </div>
       </div>
 
-      {tab==="board" && (
-        <div style={{ background:"#E3F2FD", borderLeft:"4px solid #1565C0", margin:"16px 24px 0", borderRadius:8, padding:"10px 16px", fontSize:13, color:"#0D47A1" }}>
-          📋 <strong>Antes de la reunión:</strong> Agrega tus notas. Todos los campos son obligatorios. Las notas se sincronizan en tiempo real con el resto del equipo. 🔄
-        </div>
-      )}
-      {tab==="votar" && (
-        <div style={{ background:"#FFF8E1", borderLeft:"4px solid #F9A825", margin:"16px 24px 0", borderRadius:8, padding:"10px 16px", fontSize:13, color:"#E65100" }}>
-          🗳️ <strong>Tienes {VOTES_PER_COL} votos por categoría ({VOTES_PER_COL*4} en total).</strong>
-        </div>
-      )}
+      {tab==="board" && <div style={{ background:"#E3F2FD", borderLeft:"4px solid #1565C0", margin:"16px 24px 0", borderRadius:8, padding:"10px 16px", fontSize:13, color:"#0D47A1" }}>
+        📋 <strong>Agrega tus notas.</strong> Todos los campos son obligatorios. Se sincronizan en tiempo real. 🔄
+      </div>}
+      {tab==="votar" && <div style={{ background:"#FFF8E1", borderLeft:"4px solid #F9A825", margin:"16px 24px 0", borderRadius:8, padding:"10px 16px", fontSize:13, color:"#E65100" }}>
+        🗳️ <strong>Tienes {votesPerCol} votos por categoría ({votesPerCol*4} en total).</strong> 1 voto por nota. Tus votos quedan guardados.
+      </div>}
 
-      <div style={{ padding:"16px 24px" }}>
+      <div style={{ padding:"16px 24px", flex:1 }}>
 
         {/* BOARD */}
         {tab==="board" && (
@@ -690,23 +762,14 @@ export default function App() {
               const isAdding = addingNote[col.id];
               const draft = draftNote[col.id];
               const valid = draftValid(col.id);
-              const missingFields = isAdding ? [
-                !draft?.text?.trim() && "descripción",
-                !draft?.area && "área",
-                !draft?.impact && "impacto",
-              ].filter(Boolean) : [];
-
+              const missing = isAdding ? [!draft?.text?.trim()&&"descripción",!draft?.area&&"área",!draft?.impact&&"impacto"].filter(Boolean) : [];
               return (
                 <div key={col.id} style={{ background:"#fff", borderRadius:12, overflow:"hidden", boxShadow:"0 2px 8px rgba(0,0,0,0.08)" }}>
                   <div style={{ background:col.header, padding:"12px 16px", textAlign:"center", fontWeight:700, fontSize:13, color:"#fff" }}>
                     {col.title}
-                    <span style={{ marginLeft:8, background:"rgba(255,255,255,0.3)", borderRadius:10, padding:"1px 8px", fontSize:11 }}>
-                      {colNotes.filter((n:any)=>n.text?.trim()).length}
-                    </span>
+                    <span style={{ marginLeft:8, background:"rgba(255,255,255,0.3)", borderRadius:10, padding:"1px 8px", fontSize:11 }}>{colNotes.filter((n:any)=>n.text?.trim()).length}</span>
                   </div>
                   <div style={{ padding:12, display:"flex", flexDirection:"column", gap:10, maxHeight:540, overflowY:"auto" }}>
-
-                    {/* Saved notes */}
                     {(colNotes as any[]).map(note=>(
                       <div key={note.id} style={{ background:col.color, borderRadius:8, padding:10, position:"relative", boxShadow:"2px 2px 6px rgba(0,0,0,0.08)" }}>
                         <button onClick={()=>removeNote(col.id,note.id)} style={{ position:"absolute", top:4, right:6, background:"none", border:"none", cursor:"pointer", fontSize:14, color:"#999" }}>×</button>
@@ -726,66 +789,38 @@ export default function App() {
                         {note.author && <div style={{ fontSize:10, color:"#555", marginTop:4 }}>✍️ {note.author}</div>}
                       </div>
                     ))}
-
-                    {/* Draft form */}
                     {isAdding ? (
                       <div style={{ background:col.color, borderRadius:8, padding:12, boxShadow:"2px 2px 6px rgba(0,0,0,0.12)", border:`2px solid ${col.header}` }}>
-                        {/* Text */}
                         <div style={{ marginBottom:8 }}>
-                          <label style={{ fontSize:10, fontWeight:700, color:col.header, display:"block", marginBottom:3 }}>
-                            DESCRIPCIÓN *
-                          </label>
-                          <textarea rows={3} autoFocus
-                            value={draft?.text||""}
-                            onChange={e=>setDraftNote(v=>({...v,[col.id]:{...v[col.id],text:e.target.value}}))}
-                            placeholder={col.placeholder}
+                          <label style={{ fontSize:10, fontWeight:700, color:col.header, display:"block", marginBottom:3 }}>DESCRIPCIÓN *</label>
+                          <textarea rows={3} autoFocus value={draft?.text||""} onChange={e=>setDraftNote(v=>({...v,[col.id]:{...v[col.id],text:e.target.value}}))} placeholder={col.placeholder}
                             style={{ width:"100%", border:`1.5px solid ${draft?.text?.trim()?"rgba(0,0,0,0.2)":"#e57373"}`, borderRadius:6, background:"rgba(255,255,255,0.7)", fontSize:12, resize:"none", fontFamily:"inherit", outline:"none", padding:"6px 8px", boxSizing:"border-box" }} />
                         </div>
-                        {/* Area */}
                         <div style={{ marginBottom:8 }}>
-                          <label style={{ fontSize:10, fontWeight:700, color:col.header, display:"block", marginBottom:3 }}>
-                            ÁREA *
-                          </label>
-                          <select value={draft?.area||""}
-                            onChange={e=>setDraftNote(v=>({...v,[col.id]:{...v[col.id],area:e.target.value}}))}
+                          <label style={{ fontSize:10, fontWeight:700, color:col.header, display:"block", marginBottom:3 }}>ÁREA *</label>
+                          <select value={draft?.area||""} onChange={e=>setDraftNote(v=>({...v,[col.id]:{...v[col.id],area:e.target.value}}))}
                             style={{ width:"100%", fontSize:12, borderRadius:6, border:`1.5px solid ${draft?.area?"rgba(0,0,0,0.2)":"#e57373"}`, background:"rgba(255,255,255,0.7)", padding:"6px 8px" }}>
-                            <option value="">— Selecciona un área —</option>
-                            {AREAS.map(a=><option key={a}>{a}</option>)}
+                            <option value="">— Selecciona un área —</option>{AREAS.map(a=><option key={a}>{a}</option>)}
                           </select>
                         </div>
-                        {/* Impact */}
                         <div style={{ marginBottom:10 }}>
-                          <label style={{ fontSize:10, fontWeight:700, color:col.header, display:"block", marginBottom:3 }}>
-                            NIVEL DE IMPACTO *
-                          </label>
-                          <select value={draft?.impact||""}
-                            onChange={e=>setDraftNote(v=>({...v,[col.id]:{...v[col.id],impact:e.target.value}}))}
+                          <label style={{ fontSize:10, fontWeight:700, color:col.header, display:"block", marginBottom:3 }}>NIVEL DE IMPACTO *</label>
+                          <select value={draft?.impact||""} onChange={e=>setDraftNote(v=>({...v,[col.id]:{...v[col.id],impact:e.target.value}}))}
                             style={{ width:"100%", fontSize:12, borderRadius:6, border:`1.5px solid ${draft?.impact?"rgba(0,0,0,0.2)":"#e57373"}`, background:"rgba(255,255,255,0.7)", padding:"6px 8px" }}>
-                            <option value="">— Selecciona el impacto —</option>
-                            {IMPACT.map(i=><option key={i}>{i}</option>)}
+                            <option value="">— Selecciona el impacto —</option>{IMPACT.map(i=><option key={i}>{i}</option>)}
                           </select>
                         </div>
-                        {/* Validation hint */}
-                        {!valid && missingFields.length > 0 && (
-                          <div style={{ fontSize:10, color:"#c62828", marginBottom:8, background:"rgba(198,40,40,0.08)", borderRadius:4, padding:"4px 8px" }}>
-                            ⚠️ Faltan: {missingFields.join(", ")}
-                          </div>
-                        )}
-                        {/* Buttons */}
+                        {!valid && missing.length>0 && <div style={{ fontSize:10, color:"#c62828", marginBottom:8, background:"rgba(198,40,40,0.08)", borderRadius:4, padding:"4px 8px" }}>⚠️ Faltan: {(missing as string[]).join(", ")}</div>}
                         <div style={{ display:"flex", gap:6 }}>
                           <button onClick={()=>saveDraft(col.id)} disabled={!valid}
-                            style={{ flex:1, background:valid?col.header:"#ccc", color:"#fff", border:"none", borderRadius:6, padding:"8px", fontSize:12, cursor:valid?"pointer":"not-allowed", fontWeight:700, transition:"background 0.2s" }}>
+                            style={{ flex:1, background:valid?col.header:"#ccc", color:"#fff", border:"none", borderRadius:6, padding:"8px", fontSize:12, cursor:valid?"pointer":"not-allowed", fontWeight:700 }}>
                             ✓ Guardar nota
                           </button>
-                          <button onClick={()=>cancelDraft(col.id)}
-                            style={{ background:"rgba(0,0,0,0.08)", color:"#555", border:"none", borderRadius:6, padding:"8px 12px", fontSize:12, cursor:"pointer" }}>
-                            Cancelar
-                          </button>
+                          <button onClick={()=>cancelDraft(col.id)} style={{ background:"rgba(0,0,0,0.08)", color:"#555", border:"none", borderRadius:6, padding:"8px 12px", fontSize:12, cursor:"pointer" }}>Cancelar</button>
                         </div>
                       </div>
                     ) : (
-                      <button onClick={()=>openDraft(col.id)}
-                        style={{ background:"rgba(0,0,0,0.04)", border:`2px dashed ${col.header}`, borderRadius:8, padding:"10px", cursor:"pointer", fontSize:13, color:col.header, fontWeight:600 }}>
+                      <button onClick={()=>openDraft(col.id)} style={{ background:"rgba(0,0,0,0.04)", border:`2px dashed ${col.header}`, borderRadius:8, padding:"10px", cursor:"pointer", fontSize:13, color:col.header, fontWeight:600 }}>
                         + Agregar nota
                       </button>
                     )}
@@ -801,7 +836,7 @@ export default function App() {
           <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16 }}>
             {COLUMNS.map(col=>{
               const colNotes = Object.values(notes[col.id]||{}).filter((n:any)=>n.text?.trim()).sort((a:any,b:any)=>b.votes-a.votes);
-              const remaining = VOTES_PER_COL-(votesUsed[col.id]||0);
+              const remaining = votesPerCol-(votesUsed[col.id]||0);
               return (
                 <div key={col.id} style={{ background:"#fff", borderRadius:12, overflow:"hidden", boxShadow:"0 2px 8px rgba(0,0,0,0.08)" }}>
                   <div style={{ background:col.header, padding:"10px 16px", textAlign:"center", fontWeight:700, fontSize:13, color:"#fff" }}>
@@ -811,7 +846,7 @@ export default function App() {
                   <div style={{ padding:12, display:"flex", flexDirection:"column", gap:8, maxHeight:560, overflowY:"auto" }}>
                     {colNotes.length===0 && <p style={{ color:"#aaa", fontSize:13, textAlign:"center", padding:20 }}>Sin notas aún</p>}
                     {(colNotes as any[]).map(note=>{
-                      const key=`${col.id}-${note.id}`, hasVoted=voted[key], canVote=!hasVoted&&remaining>0;
+                      const key=`${col.id}-${note.id}`, hasVoted=!!voted[key], canVote=!hasVoted&&remaining>0;
                       return (
                         <div key={note.id} style={{ background:col.color, borderRadius:8, padding:10, opacity:!canVote&&!hasVoted?0.5:1 }}>
                           <p style={{ margin:"0 0 6px", fontSize:13 }}>{note.text}</p>
@@ -839,27 +874,20 @@ export default function App() {
         {tab==="porques" && (
           <div style={{ display:"grid", gridTemplateColumns:"280px 1fr", gap:16 }}>
             <div style={{ background:"#fff", borderRadius:12, padding:16, boxShadow:"0 2px 8px rgba(0,0,0,0.08)", maxHeight:700, overflowY:"auto" }}>
-              <h4 style={{ margin:"0 0 10px", color:"#333", fontSize:14 }}>🔍 Notas para analizar</h4>
-              {ANALYZE_COLS.map(colId=>{
-                const col=COLUMNS.find(c=>c.id===colId)!;
-                const colNotes=Object.values(notes[colId]||{}).filter((n:any)=>n.text?.trim()).sort((a:any,b:any)=>b.votes-a.votes);
+              <h4 style={{ margin:"0 0 4px", color:"#333", fontSize:14 }}>🔍 Problemas para analizar</h4>
+              <p style={{ margin:"0 0 12px", fontSize:11, color:"#aaa" }}>Solo aplica a problemas. Ordenados por votos.</p>
+              {Object.values(notes["problemas"]||{}).filter((n:any)=>n.text?.trim()).sort((a:any,b:any)=>b.votes-a.votes).length===0 &&
+                <p style={{ color:"#ccc", fontSize:12 }}>Sin problemas registrados.</p>}
+              {(Object.values(notes["problemas"]||{}).filter((n:any)=>n.text?.trim()).sort((a:any,b:any)=>b.votes-a.votes) as any[]).map(note=>{
+                const col=COLUMNS[0], isSel=selectedNote?.id===note.id, hasA=porques[note.id]?.whys?.some((w:string)=>w?.trim());
                 return (
-                  <div key={colId} style={{ marginBottom:14 }}>
-                    <div style={{ fontSize:11, fontWeight:700, color:col.header, marginBottom:6, textTransform:"uppercase" }}>{col.title}</div>
-                    {colNotes.length===0&&<p style={{ color:"#ccc", fontSize:12 }}>Sin notas</p>}
-                    {(colNotes as any[]).map(note=>{
-                      const isSel=selectedNote?.id===note.id, hasA=porques[note.id]?.whys?.some((w:string)=>w?.trim());
-                      return (
-                        <div key={note.id} onClick={()=>setSelectedNote({...note,col:colId})}
-                          style={{ background:isSel?col.color:"#fafafa", border:`2px solid ${isSel?col.header:"#eee"}`, borderRadius:8, padding:8, marginBottom:6, cursor:"pointer" }}>
-                          <div style={{ fontSize:12, fontWeight:isSel?700:400 }}>{note.text.slice(0,55)}{note.text.length>55?"...":""}</div>
-                          <div style={{ display:"flex", justifyContent:"space-between", marginTop:3 }}>
-                            <span style={{ fontSize:10, color:"#888" }}>{note.area}</span>
-                            <span style={{ fontSize:10 }}>👍{note.votes} {hasA?"✅":""}</span>
-                          </div>
-                        </div>
-                      );
-                    })}
+                  <div key={note.id} onClick={()=>setSelectedNote({...note,col:"problemas"})}
+                    style={{ background:isSel?col.color:"#fafafa", border:`2px solid ${isSel?col.header:"#eee"}`, borderRadius:8, padding:8, marginBottom:6, cursor:"pointer" }}>
+                    <div style={{ fontSize:12, fontWeight:isSel?700:400 }}>{note.text.slice(0,55)}{note.text.length>55?"...":""}</div>
+                    <div style={{ display:"flex", justifyContent:"space-between", marginTop:3 }}>
+                      <span style={{ fontSize:10, color:"#888" }}>{note.area}</span>
+                      <span style={{ fontSize:10 }}>👍{note.votes} {hasA?"✅":""}</span>
+                    </div>
                   </div>
                 );
               })}
@@ -868,17 +896,17 @@ export default function App() {
               {!selectedNote ? (
                 <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100%", flexDirection:"column", color:"#aaa" }}>
                   <div style={{ fontSize:48 }}>👈</div>
-                  <p style={{ fontSize:14 }}>Selecciona una nota para aplicar los 5 Porqués</p>
+                  <p style={{ fontSize:14 }}>Selecciona un problema para aplicar los 5 Porqués</p>
                 </div>
               ):(()=>{
-                const col=COLUMNS.find(c=>c.id===selectedNote.col)!;
+                const col=COLUMNS[0];
                 const whys: string[]=porques[selectedNote.id]?.whys||["","","","",""];
                 const lastFilled=[...whys].reverse().find((w:string)=>w?.trim());
                 const alreadyCreated=actList.some((a:any)=>a.fromCause===selectedNote.id);
                 return (
                   <>
                     <div style={{ background:col.color, borderRadius:8, padding:12, marginBottom:20, borderLeft:`4px solid ${col.header}` }}>
-                      <div style={{ fontSize:11, color:col.header, fontWeight:700, marginBottom:4 }}>{col.title.toUpperCase()}</div>
+                      <div style={{ fontSize:11, color:col.header, fontWeight:700, marginBottom:4 }}>PROBLEMA</div>
                       <div style={{ fontSize:14, fontWeight:700 }}>{selectedNote.text}</div>
                     </div>
                     <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
@@ -943,9 +971,8 @@ export default function App() {
                     <tr key={a.id} style={{ borderBottom:"1px solid #E8F5E9", background:a.fromCause?"#F3E5F5":"white" }}>
                       <td style={{ padding:"8px 12px", color:"#aaa", fontWeight:700 }}>{i+1}</td>
                       <td style={{ padding:"8px 12px", fontSize:11 }}>
-                        {a.fromCause
-                          ? <span style={{ background:"#EDE7F6", color:"#6A1B9A", borderRadius:4, padding:"2px 6px" }}>🔍 Causa raíz</span>
-                          : <span style={{ background:"#E8F5E9", color:"#2E7D32", borderRadius:4, padding:"2px 6px" }}>✍️ Manual</span>}
+                        {a.fromCause?<span style={{ background:"#EDE7F6", color:"#6A1B9A", borderRadius:4, padding:"2px 6px" }}>🔍 Causa raíz</span>
+                          :<span style={{ background:"#E8F5E9", color:"#2E7D32", borderRadius:4, padding:"2px 6px" }}>✍️ Manual</span>}
                       </td>
                       <td style={{ padding:"8px 12px", maxWidth:140 }}>
                         {a.problem?<span style={{ fontSize:11, background:"#FFF9C4", borderRadius:4, padding:"2px 6px", color:"#795548" }}>📌 {a.problem}</span>:<span style={{ fontSize:11, color:"#ccc" }}>—</span>}
@@ -1002,36 +1029,32 @@ export default function App() {
             <div style={{ gridColumn:"1/-1", background:"#fff", borderRadius:12, padding:20, boxShadow:"0 2px 8px rgba(0,0,0,0.08)" }}>
               <h4 style={{ margin:"0 0 16px", color:"#333" }}>🔗 Trazabilidad: Problema → Causa Raíz → Acción</h4>
               {Object.values(porques).filter((p:any)=>p.whys?.some((w:string)=>w?.trim())).length===0
-                ? <p style={{ color:"#aaa", fontSize:13 }}>Aún no hay análisis de 5 Porqués completados.</p>
-                : ANALYZE_COLS.flatMap(colId=>
-                    Object.values(notes[colId]||{}).filter((n:any)=>n.text?.trim()&&porques[n.id]?.whys?.some((w:string)=>w?.trim()))
-                      .map((note:any)=>{
-                        const pq=porques[note.id], causeRoot=[...(pq?.whys||[])].reverse().find((w:string)=>w?.trim());
-                        const relAct=actList.find((a:any)=>a.fromCause===note.id);
-                        const col=COLUMNS.find(c=>c.id===colId)!;
-                        return (
-                          <div key={note.id} style={{ display:"grid", gridTemplateColumns:"1fr auto 1fr auto 1fr", gap:8, alignItems:"center", marginBottom:12, background:"#FAFAFA", borderRadius:8, padding:12 }}>
-                            <div style={{ background:col.color, borderRadius:8, padding:"8px 12px", borderLeft:`3px solid ${col.header}` }}>
-                              <div style={{ fontSize:10, color:col.header, fontWeight:700, marginBottom:2 }}>📌 PROBLEMA</div>
-                              <div style={{ fontSize:12 }}>{note.text.slice(0,60)}{note.text.length>60?"...":""}</div>
-                              <div style={{ fontSize:10, color:"#aaa", marginTop:2 }}>👍 {note.votes} votos</div>
-                            </div>
-                            <div style={{ fontSize:20, color:"#1565C0", fontWeight:700 }}>→</div>
-                            <div style={{ background:"#E8F5E9", borderRadius:8, padding:"8px 12px", borderLeft:"3px solid #388E3C" }}>
-                              <div style={{ fontSize:10, color:"#388E3C", fontWeight:700, marginBottom:2 }}>🎯 CAUSA RAÍZ</div>
-                              <div style={{ fontSize:12 }}>{(causeRoot||"").slice(0,80)}</div>
-                            </div>
-                            <div style={{ fontSize:20, color:"#1565C0", fontWeight:700 }}>→</div>
-                            <div style={{ background:relAct?"#EDE7F6":"#f5f5f5", borderRadius:8, padding:"8px 12px", borderLeft:`3px solid ${relAct?"#7B1FA2":"#ccc"}` }}>
-                              <div style={{ fontSize:10, color:relAct?"#7B1FA2":"#aaa", fontWeight:700, marginBottom:2 }}>✅ ACCIÓN</div>
-                              {relAct
-                                ? <><div style={{ fontSize:12 }}>{(relAct.what||"").slice(0,60)}</div><div style={{ fontSize:10, color:"#888", marginTop:2 }}>👤 {relAct.who||"Sin responsable"} · {relAct.when||"Sin fecha"}</div></>
-                                : <div style={{ fontSize:12, color:"#aaa" }}>Sin acción creada</div>}
-                            </div>
-                          </div>
-                        );
-                      })
-                  )
+                ? <p style={{ color:"#aaa", fontSize:13 }}>Sin análisis completados aún.</p>
+                : (Object.values(notes["problemas"]||{}).filter((n:any)=>n.text?.trim()&&porques[n.id]?.whys?.some((w:string)=>w?.trim())) as any[]).map(note=>{
+                    const pq=porques[note.id], causeRoot=[...(pq?.whys||[])].reverse().find((w:string)=>w?.trim());
+                    const relAct=actList.find((a:any)=>a.fromCause===note.id), col=COLUMNS[0];
+                    return (
+                      <div key={note.id} style={{ display:"grid", gridTemplateColumns:"1fr auto 1fr auto 1fr", gap:8, alignItems:"center", marginBottom:12, background:"#FAFAFA", borderRadius:8, padding:12 }}>
+                        <div style={{ background:col.color, borderRadius:8, padding:"8px 12px", borderLeft:`3px solid ${col.header}` }}>
+                          <div style={{ fontSize:10, color:col.header, fontWeight:700, marginBottom:2 }}>📌 PROBLEMA</div>
+                          <div style={{ fontSize:12 }}>{note.text.slice(0,60)}{note.text.length>60?"...":""}</div>
+                          <div style={{ fontSize:10, color:"#aaa", marginTop:2 }}>👍 {note.votes} votos</div>
+                        </div>
+                        <div style={{ fontSize:20, color:"#1565C0", fontWeight:700 }}>→</div>
+                        <div style={{ background:"#E8F5E9", borderRadius:8, padding:"8px 12px", borderLeft:"3px solid #388E3C" }}>
+                          <div style={{ fontSize:10, color:"#388E3C", fontWeight:700, marginBottom:2 }}>🎯 CAUSA RAÍZ</div>
+                          <div style={{ fontSize:12 }}>{(causeRoot||"").slice(0,80)}</div>
+                        </div>
+                        <div style={{ fontSize:20, color:"#1565C0", fontWeight:700 }}>→</div>
+                        <div style={{ background:relAct?"#EDE7F6":"#f5f5f5", borderRadius:8, padding:"8px 12px", borderLeft:`3px solid ${relAct?"#7B1FA2":"#ccc"}` }}>
+                          <div style={{ fontSize:10, color:relAct?"#7B1FA2":"#aaa", fontWeight:700, marginBottom:2 }}>✅ ACCIÓN</div>
+                          {relAct
+                            ? <><div style={{ fontSize:12 }}>{(relAct.what||"").slice(0,60)}</div><div style={{ fontSize:10, color:"#888", marginTop:2 }}>👤 {relAct.who||"Sin responsable"} · {relAct.when||"Sin fecha"}</div></>
+                            : <div style={{ fontSize:12, color:"#aaa" }}>Sin acción creada</div>}
+                        </div>
+                      </div>
+                    );
+                  })
               }
             </div>
             <div style={{ background:"#fff", borderRadius:12, padding:20, boxShadow:"0 2px 8px rgba(0,0,0,0.08)" }}>
@@ -1062,8 +1085,8 @@ export default function App() {
             </div>
           </div>
         )}
-
       </div>
+      <Footer />
     </div>
   );
 }
