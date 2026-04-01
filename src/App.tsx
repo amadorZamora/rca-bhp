@@ -148,7 +148,7 @@ export default function App() {
     if (adminDoc.exists()) {
       const data = adminDoc.data();
       if (!loginPw) { setLoginErr("Ingresa tu contraseña."); setLoginLoading(false); return; }
-      if (data.password !== simpleHash(loginPw)) {
+      if (data.password !== loginPw && data.password !== simpleHash(loginPw)) {
         setLoginErr("Contraseña incorrecta."); setLoginLoading(false); return;
       }
       setIsAdmin(true);
