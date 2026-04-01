@@ -352,6 +352,9 @@ export default function App() {
           <div style={{ fontSize:52 }}>🪨</div>
           <h2 style={{ margin:"8px 0 4px", color:"#1a237e" }}>RCA Platform</h2>
           <p style={{ color:"#888", fontSize:13, margin:0 }}>Lecciones Aprendidas · BHP</p>
+          <p style={{ color:"#bbb", fontSize:11, margin:"4px 0 0" }}>
+            v{__APP_VERSION__} · {__GIT_HASH__} · {__GIT_DATE__}
+          </p>
         </div>
         <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
           <div>
@@ -390,6 +393,7 @@ export default function App() {
     <div style={{ minHeight:"100vh", background:"#f0f4f8", fontFamily:"'Segoe UI',sans-serif" }}>
       <div style={{ background:"#1a237e", color:"#fff", padding:"14px 24px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
         <span style={{ fontSize:18, fontWeight:700 }}>🪨 RCA Platform · Admin</span>
+        <span style={{ fontSize:11, opacity:0.5, marginLeft:8 }}>v{__APP_VERSION__} · {__GIT_HASH__}</span>
         <div style={{ display:"flex", gap:8, alignItems:"center" }}>
           <span style={{ fontSize:13, opacity:0.8 }}>🔑 {userName} · {userEmail}</span>
           <button onClick={logout} style={{ background:"rgba(255,255,255,0.15)", color:"#fff", border:"none", borderRadius:20, padding:"6px 16px", fontSize:13, cursor:"pointer" }}>
@@ -635,6 +639,7 @@ export default function App() {
             {isAdmin ? "← Panel Admin" : "← Proyectos"}
           </button>
           <span style={{ fontSize:15, fontWeight:700 }}>🪨 {selectedProject?.name}</span>
+          <span style={{ fontSize:10, opacity:0.5 }}>v{__APP_VERSION__} · {__GIT_HASH__}</span>
           {isAdmin && <span style={{ background:"#F9A825", color:"#fff", borderRadius:12, padding:"2px 10px", fontSize:11, fontWeight:700 }}>🔑 Admin</span>}
           {saving && <span style={{ fontSize:11, opacity:0.7 }}>💾 guardando...</span>}
         </div>
